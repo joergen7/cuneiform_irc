@@ -1,2 +1,2 @@
-# cuneiform-irc
+# cuneiform_irc
 A Cuneiform IRC chatterbot.
