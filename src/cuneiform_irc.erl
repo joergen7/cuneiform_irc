@@ -124,10 +124,8 @@ handle_privmsg( public, User, Content, BotState ) ->
       end;
 
     [$>|Code] ->
-
-      {ReplyLst, PublicShell1} = cuneiform_shell:shell_eval( Code++"\n", PublicShell ),
-      Reply = lists:flatten( string:join( [io_lib:format( "~s: ~p", [User, X] ) || X <- ReplyLst], "\n" ) ),
-      {reply, Reply, BotState#bot_state{ public_shell = PublicShell1 }};
+      {F, PublicShell1} = process_code( User, Code, PublicShell ),
+      {spawn, F, BotState#bot_state{ public_shell = PublicShell1 }};
 
     _ ->
 
@@ -135,17 +133,19 @@ handle_privmsg( public, User, Content, BotState ) ->
       case Mode of
 
         code ->
+          {F, PublicShell1} = process_code( User, Content, PublicShell ),
+          {spawn, F, BotState#bot_state{ public_shell = PublicShell1 }};
 
-          {ReplyLst, PublicShell1} = cuneiform_shell:shell_eval( Content++"\n", PublicShell ),
-          Reply = lists:flatten( string:join( [io_lib:format( "~s: ~p", [User, X] ) || X <- ReplyLst], "\n" ) ),
-          {reply, Reply, BotState#bot_state{ public_shell = PublicShell1 }};
 
         comment ->
           {noreply, BotState}
 
       end
 
-  end.
+  end;
+
+handle_privmsg( private, _, _, BotState ) ->
+  {noreply, BotState}.
 
 
 
@@ -158,7 +158,7 @@ handle_join( User, BotState ) ->
   #bot_state{ mode_map  = ModeMap,
               shell_map = ShellMap } = BotState,
 
-  ModeMap1  = ModeMap#{ User => spectate },
+  ModeMap1  = ModeMap#{ User => comment },
   ShellMap1 = ShellMap#{ User => #shell_state{} },
 
   BotState#bot_state{ mode_map = ModeMap1, shell_map = ShellMap1 }.
@@ -182,3 +182,14 @@ handle_part( User, BotState ) ->
 %%====================================================================
 %% Internal functions
 %%====================================================================
+
+process_code( User, Code, ShellState ) ->
+
+  {ReplyLst, ShellState1} = cuneiform_shell:shell_eval( Code++"\n", ShellState ),
+
+  F =
+    fun() ->
+     lists:flatten( string:join( [io_lib:format( "~s: ~p", [User, X] ) || X <- ReplyLst], "\n" ) )
+    end,
+
+  {F, ShellState1}.
