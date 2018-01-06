@@ -30,10 +30,8 @@
 %%====================================================================
 
 -record( bot_state, { nick_name,
-                      cf_client,
                       public_shell = #shell_state{},
-                      mode_map     = #{},
-                      shell_map    = #{} } ).
+                      mode_map     = #{} } ).
 
 %%====================================================================
 %% Exports
@@ -78,23 +76,17 @@ main( _Args ) ->
 
 init( {NickName} ) ->
 
-  % start CRE
-  ok = cre:start(),
-
-  % attach workers
-  ok = cf_worker:start(),
-
   % attach client service
   ok = cf_client:start(),
 
-  #bot_state{ nick_name = NickName, cf_client = cf_client }.
+  #bot_state{ nick_name = NickName }.
 
 
 handle_privmsg( public, User, Content, BotState ) ->
 
-  #bot_state{ nick_name = NickName,
+  #bot_state{ nick_name    = NickName,
               public_shell = PublicShell,
-              mode_map  = ModeMap } = BotState,
+              mode_map     = ModeMap } = BotState,
 
   case string:prefix( Content, NickName ) of
 
@@ -117,6 +109,24 @@ handle_privmsg( public, User, Content, BotState ) ->
 
         ["mode"|_] ->
           {reply, User++": Error: mode expects exactly one argument.", BotState};
+
+        ["reset"] ->
+          {reply, User++": Shell reinitialized.", BotState#bot_state{ public_shell = #shell_state{} }};
+
+        ["hist"] ->
+
+          G =
+            fun( {assign, _, R, E} ) ->
+              SR = string:pad( cuneiform_shell:format_pattern( R ), 16, trailing ),
+              SE = cuneiform_shell:format_expr( E ),
+              io_lib:format( "let ~s = ~s;~n", [SR, SE] )
+            end,
+
+          #shell_state{ def_lst = DefLst } = PublicShell,
+
+          Reply = User++": "++lists:flatten( string:join( [G( Def ) || Def <- DefLst], "\n" ) ),
+
+          {reply, Reply, BotState};
 
         [Cmd|_] ->
           {reply, User++": Command not recognized: "++Cmd, BotState}
@@ -155,24 +165,20 @@ handle_privmsg( private, _, _, BotState ) ->
 
 handle_join( User, BotState ) ->
 
-  #bot_state{ mode_map  = ModeMap,
-              shell_map = ShellMap } = BotState,
+  #bot_state{ mode_map  = ModeMap } = BotState,
 
   ModeMap1  = ModeMap#{ User => comment },
-  ShellMap1 = ShellMap#{ User => #shell_state{} },
 
-  BotState#bot_state{ mode_map = ModeMap1, shell_map = ShellMap1 }.
+  BotState#bot_state{ mode_map = ModeMap1 }.
 
 
 handle_part( User, BotState ) ->
 
-  #bot_state{ mode_map  = ModeMap,
-              shell_map = ShellMap } = BotState,
+  #bot_state{ mode_map  = ModeMap } = BotState,
 
   ModeMap1 = maps:remove( User, ModeMap ),
-  ShellMap1 = maps:remove( User, ShellMap ),
 
-  BotState#bot_state{ mode_map = ModeMap1, shell_map = ShellMap1 }.
+  BotState#bot_state{ mode_map = ModeMap1 }.
 
 
 
@@ -188,8 +194,29 @@ process_code( User, Code, ShellState ) ->
   {ReplyLst, ShellState1} = cuneiform_shell:shell_eval( Code++"\n", ShellState ),
 
   F =
-    fun() ->
-     lists:flatten( string:join( [io_lib:format( "~s: ~p", [User, X] ) || X <- ReplyLst], "\n" ) )
+    fun
+
+      ( {query, E} ) ->
+        V = cre_client:eval( cf_client, E ),
+        {ok, T} = cuneiform_type:type( V ),
+        SV = cuneiform_shell:format_expr( V ),
+        ST = cuneiform_shell:format_type( T ),
+        io_lib:format( "~s : ~s", [SV, ST] );
+
+      ( {parrot, E, T} ) ->
+        SE = cuneiform_shell:format_expr( E ),
+        ST = cuneiform_shell:format_type( T ),
+        io_lib:format( "~s : ~s", [SE, ST] );
+
+      ( Reply = {error, _Stage, _Reason} ) ->
+        S = cuneiform_shell:format_error( Reply ),
+        io_lib:format( "~s", [S] )
+
     end,
 
-  {F, ShellState1}.
+  G =
+    fun() ->
+      lists:flatten( User++": "++string:join( [F( X ) || X <- ReplyLst], "\n" ) )
+    end,
+
+  {G, ShellState1}.
