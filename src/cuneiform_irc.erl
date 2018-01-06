@@ -53,7 +53,7 @@ main( _Args ) ->
   RealName = "Cuneiform: A functional workflow language for large-scale data analysis",
 
   ConnInfo = {conn_info, Server, Port, NickName, UserName, RealName},
-  Channel = "#botwar",
+  Channel = "#cuneiform-lang",
   UsrMod  = ?MODULE,
 
   gen_ircclient:start_link( ConnInfo, Channel, UsrMod, {NickName} ),
@@ -88,30 +88,24 @@ handle_privmsg( public, User, Content, BotState ) ->
               public_shell = PublicShell,
               mode_map     = ModeMap } = BotState,
 
-  case string:prefix( Content, NickName ) of
 
-    [$:|Ctl] ->
+  case Content of
 
-      case string:tokens( Ctl, " \t" ) of
+    [$#|Ctl] ->
+      case string:tokens( Ctl, " " ) of
 
-        ["mode", "comment"] ->
-          ModeMap1 = ModeMap#{ User => comment },
+        ["mode", "spectate"] ->
+          ModeMap1 = ModeMap#{ User => spectate },
           BotState1 = BotState#bot_state{ mode_map = ModeMap1 },
-          {reply, User++": mode set to comment.", BotState1};
+          {reply, User++": mode set to spectate.", BotState1};
 
-        ["mode", "code"] ->
-          ModeMap1 = ModeMap#{ User => code },
+        ["mode", "cuneiform"] ->
+          ModeMap1 = ModeMap#{ User => cuneiform },
           BotState1 = BotState#bot_state{ mode_map = ModeMap1 },
-          {reply, User++": mode set to code.", BotState1};
+          {reply, User++": mode set to cuneiform.", BotState1};
 
-        ["mode", X] ->
-          {reply, User++": Error: mode not recognized: "++X, BotState};
-
-        ["mode"|_] ->
-          {reply, User++": Error: mode expects exactly one argument.", BotState};
-
-        ["reset"] ->
-          {reply, User++": Shell reinitialized.", BotState#bot_state{ public_shell = #shell_state{} }};
+        ["reset", "cuneiform"] ->
+          {reply, User++": Cuneiform shell reinitialized.", BotState#bot_state{ public_shell = #shell_state{} }};
 
         ["hist"] ->
 
@@ -128,27 +122,31 @@ handle_privmsg( public, User, Content, BotState ) ->
 
           {reply, Reply, BotState};
 
-        [Cmd|_] ->
-          {reply, User++": Command not recognized: "++Cmd, BotState}
+        _ ->
+          {noreply, BotState}
 
       end;
 
-    [$>|Code] ->
-      {F, PublicShell1} = process_code( User, Code, PublicShell ),
-      {spawn, F, BotState#bot_state{ public_shell = PublicShell1 }};
-
     _ ->
+      case string:prefix( Content, NickName++":" ) of
 
-      #{ User := Mode } = ModeMap,
-      case Mode of
+        nomatch ->
+          #{ User := Mode } = ModeMap,
+          case Mode of
 
-        code ->
-          {F, PublicShell1} = process_code( User, Content, PublicShell ),
-          {spawn, F, BotState#bot_state{ public_shell = PublicShell1 }};
+            cuneiform ->
+              {F, PublicShell1} = process_code( User, Content, PublicShell ),
+              {spawn, F, BotState#bot_state{ public_shell = PublicShell1 }};
 
+            spectate ->
+              {noreply, BotState}
 
-        comment ->
-          {noreply, BotState}
+          end;
+
+        Code ->
+          {F, PublicShell1} = process_code( User, Code, PublicShell ),
+          {spawn, F, BotState#bot_state{ public_shell = PublicShell1 }}
+
 
       end
 
@@ -167,7 +165,7 @@ handle_join( User, BotState ) ->
 
   #bot_state{ mode_map  = ModeMap } = BotState,
 
-  ModeMap1  = ModeMap#{ User => comment },
+  ModeMap1  = ModeMap#{ User => spectate },
 
   BotState#bot_state{ mode_map = ModeMap1 }.
 
