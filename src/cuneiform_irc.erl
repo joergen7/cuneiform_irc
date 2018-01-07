@@ -135,8 +135,7 @@ handle_privmsg( public, User, Content, BotState ) ->
           case Mode of
 
             cuneiform ->
-              {F, PublicShell1} = process_code( User, Content, PublicShell ),
-              {spawn, F, BotState#bot_state{ public_shell = PublicShell1 }};
+              process_code( User, Content, BotState );
 
             spectate ->
               {noreply, BotState}
@@ -144,8 +143,7 @@ handle_privmsg( public, User, Content, BotState ) ->
           end;
 
         Code ->
-          {F, PublicShell1} = process_code( User, Code, PublicShell ),
-          {spawn, F, BotState#bot_state{ public_shell = PublicShell1 }}
+          process_code( User, Code, BotState )
 
 
       end
@@ -187,7 +185,9 @@ handle_part( User, BotState ) ->
 %% Internal functions
 %%====================================================================
 
-process_code( User, Code, ShellState ) ->
+process_code( User, Code, BotState ) ->
+
+  #bot_state{ public_shell = ShellState } = BotState,
 
   {ReplyLst, ShellState1} = cuneiform_shell:shell_eval( Code++"\n", ShellState ),
 
@@ -214,7 +214,12 @@ process_code( User, Code, ShellState ) ->
 
   G =
     fun() ->
-      lists:flatten( User++": "++string:join( [F( X ) || X <- ReplyLst], "\n" ) )
+      lists:flatten( string:join( [F( X ) || X <- ReplyLst], "\n" ) )
     end,
 
-  {G, ShellState1}.
+  BotState1 = BotState#bot_state{ public_shell = ShellState1 },
+
+  case ReplyLst of
+    [] ->    {noreply, BotState1};
+    [_|_] -> {spawn, G, BotState1}
+  end.
