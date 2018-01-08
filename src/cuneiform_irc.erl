@@ -31,7 +31,8 @@
 
 -record( bot_state, { nick_name,
                       public_shell = #shell_state{},
-                      mode_map     = #{} } ).
+                      mode_map     = #{},
+                      white_lst    = [] } ).
 
 %%====================================================================
 %% Exports
@@ -53,10 +54,11 @@ main( _Args ) ->
   RealName = "Cuneiform: A functional workflow language for large-scale data analysis",
 
   ConnInfo = {conn_info, Server, Port, NickName, UserName, RealName},
-  Channel = "#cuneiform-lang",
-  UsrMod  = ?MODULE,
+  Channel  = "#cuneiform-lang",
+  UsrMod   = ?MODULE,
+  WhiteLst = ["joergen7"],
 
-  gen_ircclient:start_link( ConnInfo, Channel, UsrMod, {NickName} ),
+  gen_ircclient:start_link( ConnInfo, Channel, UsrMod, {NickName, WhiteLst} ),
 
   receive
     X -> X
@@ -74,89 +76,95 @@ main( _Args ) ->
 %%====================================================================
 
 
-init( {NickName} ) ->
+init( {NickName, WhiteLst} ) ->
 
   % attach client service
   ok = cf_client:start(),
 
-  #bot_state{ nick_name = NickName }.
+  #bot_state{ nick_name = NickName, white_lst = WhiteLst }.
 
 
 handle_privmsg( public, User, Content, BotState ) ->
 
   #bot_state{ nick_name    = NickName,
-              public_shell = PublicShell,
-              mode_map     = ModeMap } = BotState,
+              mode_map     = ModeMap,
+              white_lst    = WhiteLst } = BotState,
+
+  % get the mode for the user
+  %
+  % while we should have received a join event for a user before we can ever get
+  % a private message, we set an unseen user to spectate, just in case
+  Mode = maps:get( User, ModeMap, spectate ),
+
+  try
+
+    case WhiteLst of
+
+      % an empty white list means everybody can edit
+      [] ->
+        ok;
+      
+      % a non-empty white list means we need to check whether the user is in the
+      % white list
+      [_|_] ->
+        case lists:member( User, WhiteLst ) of
+          true  -> ok;
+          false -> throw( ignore )
+        end
+
+    end,
 
 
-  case Content of
+    case Content of
 
-    [$#|Ctl] ->
-      case string:tokens( Ctl, " " ) of
+      % should the message start with a hashtag interpret it as a control
+      % message
+      [$&|Ctl] ->
+        case string:tokens( Ctl, " " ) of
+          ["mode", "cuneiform"]  -> throw( {mode, cuneiform} );
+          ["mode", _]            -> throw( {mode, spectate} );
+          ["reset", "cuneiform"] -> throw( reset );
+          ["hist"]               -> throw( hist );
+          _                      -> throw( ignore )
+        end;
 
-        ["mode", "spectate"] ->
-          ModeMap1 = ModeMap#{ User => spectate },
-          BotState1 = BotState#bot_state{ mode_map = ModeMap1 },
-          {reply, User++": mode set to spectate.", BotState1};
+      % no control message means: go on
+      _ ->
+        ok
 
-        ["mode", "cuneiform"] ->
-          ModeMap1 = ModeMap#{ User => cuneiform },
-          BotState1 = BotState#bot_state{ mode_map = ModeMap1 },
-          {reply, User++": mode set to cuneiform.", BotState1};
-
-        ["reset", "cuneiform"] ->
-          {reply, User++": Cuneiform shell reinitialized.", BotState#bot_state{ public_shell = #shell_state{} }};
-
-        ["hist"] ->
-
-          G =
-            fun( {assign, _, R, E} ) ->
-              SR = string:pad( cuneiform_shell:format_pattern( R ), 16, trailing ),
-              SE = cuneiform_shell:format_expr( E ),
-              io_lib:format( "let ~s = ~s;~n", [SR, SE] )
-            end,
-
-          #shell_state{ def_lst = DefLst } = PublicShell,
-
-          Reply = User++": "++lists:flatten( string:join( [G( Def ) || Def <- DefLst], "\n" ) ),
-
-          {reply, Reply, BotState};
-
-        _ ->
-          {noreply, BotState}
-
-      end;
-
-    _ ->
-      case string:prefix( Content, NickName++":" ) of
-
-        nomatch ->
-          #{ User := Mode } = ModeMap,
-          case Mode of
-
-            cuneiform ->
-              process_code( User, Content, BotState );
-
-            spectate ->
-              {noreply, BotState}
-
-          end;
-
-        Code ->
-          process_code( User, Code, BotState )
+    end,
 
 
-      end
 
+    case string:prefix( Content, NickName++":" ) of
+
+      % a generic message is interpreted only if we are in cuneiform mode
+      nomatch ->
+        case Mode of
+          cuneiform -> throw( {process, Content} );
+          spectate  -> throw( ignore )
+        end;
+
+      % a message that addresses the bot is interpreted as code
+      Code ->
+        throw( {process, Code} )
+
+
+    end,
+
+    % dead end; some exception should have been thrown
+    error( end_of_control )
+
+  catch
+    throw:ignore       -> {noreply, BotState};
+    throw:{process, C} -> process_code( C, BotState );
+    throw:{mode, M}    -> set_mode( M, User, BotState );
+    throw:reset        -> reset( BotState );
+    throw:hist         -> hist( BotState )
   end;
 
 handle_privmsg( private, _, _, BotState ) ->
   {noreply, BotState}.
-
-
-
-
-
 
 
 handle_join( User, BotState ) ->
@@ -185,7 +193,7 @@ handle_part( User, BotState ) ->
 %% Internal functions
 %%====================================================================
 
-process_code( User, Code, BotState ) ->
+process_code( Code, BotState ) ->
 
   #bot_state{ public_shell = ShellState } = BotState,
 
@@ -196,10 +204,18 @@ process_code( User, Code, BotState ) ->
 
       ( {query, E} ) ->
         V = cre_client:eval( cf_client, E ),
-        {ok, T} = cuneiform_type:type( V ),
-        SV = cuneiform_shell:format_expr( V ),
-        ST = cuneiform_shell:format_type( T ),
-        io_lib:format( "~s : ~s", [SV, ST] );
+        case V of
+
+          {err, _, _} ->
+            cuneiform_shell:format_error( {error, eval,V} );
+
+          _ ->
+            {ok, T} = cuneiform_type:type( V ),
+            SV = cuneiform_shell:format_expr( V ),
+            ST = cuneiform_shell:format_type( T ),
+            io_lib:format( "~s : ~s", [SV, ST] )
+
+        end;
 
       ( {parrot, E, T} ) ->
         SE = cuneiform_shell:format_expr( E ),
@@ -207,8 +223,7 @@ process_code( User, Code, BotState ) ->
         io_lib:format( "~s : ~s", [SE, ST] );
 
       ( Reply = {error, _Stage, _Reason} ) ->
-        S = cuneiform_shell:format_error( Reply ),
-        io_lib:format( "~s", [S] )
+        cuneiform_shell:format_error( Reply )
 
     end,
 
@@ -223,3 +238,36 @@ process_code( User, Code, BotState ) ->
     [] ->    {noreply, BotState1};
     [_|_] -> {spawn, G, BotState1}
   end.
+
+
+set_mode( Mode, User, BotState )
+when Mode =:= spectate orelse Mode =:= cuneiform ->
+
+  #bot_state{ mode_map = ModeMap } = BotState,
+
+  ModeMap1 = ModeMap#{ User => Mode },
+  BotState1 = BotState#bot_state{ mode_map = ModeMap1 },
+
+  {reply, User++": mode set to "++atom_to_list( Mode ), BotState1}.
+
+
+reset( BotState ) ->
+  {reply, "shell state reinitialized",
+          BotState#bot_state{ public_shell = #shell_state{} }}.
+
+
+hist( BotState ) ->
+
+  G =
+    fun( {assign, _, R, E} ) ->
+      SR = string:pad( cuneiform_shell:format_pattern( R ), 16, trailing ),
+      SE = cuneiform_shell:format_expr( E ),
+      io_lib:format( "let ~s = ~s;~n", [SR, SE] )
+    end,
+
+  #bot_state{ public_shell = PublicShell } = BotState,
+  #shell_state{ def_lst = DefLst } = PublicShell,
+
+  Reply = lists:flatten( string:join( [G( Def ) || Def <- DefLst], "\n" ) ),
+
+  {reply, Reply, BotState}.
